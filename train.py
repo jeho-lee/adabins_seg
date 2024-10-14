@@ -20,18 +20,13 @@ import utils
 from dataloader import DepthDataLoader
 from loss import SILogLoss, BinsChamferLoss
 from utils import RunningAverage, colorize
+import matplotlib
 
-# os.environ['WANDB_MODE'] = 'dryrun'
 PROJECT = "MDE-AdaBins"
 logging = True
 
-
 def is_rank_zero(args):
     return args.rank == 0
-
-
-import matplotlib
-
 
 def colorize(value, vmin=10, vmax=1000, cmap='plasma'):
     # normalize
@@ -40,19 +35,11 @@ def colorize(value, vmin=10, vmax=1000, cmap='plasma'):
     if vmin != vmax:
         value = (value - vmin) / (vmax - vmin)  # vmin..vmax
     else:
-        # Avoid 0-division
         value = value * 0.
-    # squeeze last dim if it exists
-    # value = value.squeeze(axis=0)
-
     cmapper = matplotlib.cm.get_cmap(cmap)
     value = cmapper(value, bytes=True)  # (nxmx4)
-
     img = value[:, :, :3]
-
-    #     return img.transpose((2, 0, 1))
     return img
-
 
 def log_images(img, depth, pred, args, step):
     depth = colorize(depth, vmin=args.min_depth, vmax=args.max_depth)
@@ -63,7 +50,6 @@ def log_images(img, depth, pred, args, step):
             "GT": [wandb.Image(depth)],
             "Prediction": [wandb.Image(pred)]
         }, step=step)
-
 
 def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
@@ -173,8 +159,7 @@ def train(model, args, epochs=10, experiment_name="DeepLab", lr=0.0001, root="."
         ################################# Train loop ##########################################################
         if should_log: wandb.log({"Epoch": epoch}, step=step)
         for i, batch in tqdm(enumerate(train_loader), desc=f"Epoch: {epoch + 1}/{epochs}. Loop: Train",
-                             total=len(train_loader)) if is_rank_zero(
-                args) else enumerate(train_loader):
+                             total=len(train_loader)) if is_rank_zero(args) else enumerate(train_loader):
 
             optimizer.zero_grad()
 

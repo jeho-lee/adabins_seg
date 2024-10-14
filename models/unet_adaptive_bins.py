@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .miniViT import mViT
-
+# from .miniViT import mViT
 
 class UpSampleBN(nn.Module):
     def __init__(self, skip_input, output_features):
@@ -21,9 +20,8 @@ class UpSampleBN(nn.Module):
         f = torch.cat([up_x, concat_with], dim=1)
         return self._net(f)
 
-
 class DecoderBN(nn.Module):
-    def __init__(self, num_features=2048, num_classes=1, bottleneck_features=2048):
+    def __init__(self, num_features=2048, num_classes=21, bottleneck_features=2048):  # num_classes for segmentation
         super(DecoderBN, self).__init__()
         features = int(num_features)
 
@@ -34,29 +32,20 @@ class DecoderBN(nn.Module):
         self.up3 = UpSampleBN(skip_input=features // 4 + 24 + 16, output_features=features // 8)
         self.up4 = UpSampleBN(skip_input=features // 8 + 16 + 8, output_features=features // 16)
 
-        #         self.up5 = UpSample(skip_input=features // 16 + 3, output_features=features//16)
-        self.conv3 = nn.Conv2d(features // 16, num_classes, kernel_size=3, stride=1, padding=1)
-        # self.act_out = nn.Softmax(dim=1) if output_activation == 'softmax' else nn.Identity()
+        self.conv3 = nn.Conv2d(features // 16, num_classes, kernel_size=3, stride=1, padding=1)  # Output is num_classes
+        self.act_out = nn.Softmax(dim=1)  # Softmax for multi-class segmentation
 
     def forward(self, features):
-        x_block0, x_block1, x_block2, x_block3, x_block4 = features[4], features[5], features[6], features[8], features[
-            11]
+        x_block0, x_block1, x_block2, x_block3, x_block4 = features[4], features[5], features[6], features[8], features[11]
 
         x_d0 = self.conv2(x_block4)
-
         x_d1 = self.up1(x_d0, x_block3)
         x_d2 = self.up2(x_d1, x_block2)
         x_d3 = self.up3(x_d2, x_block1)
         x_d4 = self.up4(x_d3, x_block0)
-        #         x_d5 = self.up5(x_d4, features[0])
         out = self.conv3(x_d4)
-        # out = self.act_out(out)
-        # if with_features:
-        #     return out, features[-1]
-        # elif with_intermediate:
-        #     return out, [x_block0, x_block1, x_block2, x_block3, x_block4, x_d1, x_d2, x_d3, x_d4]
+        out = self.act_out(out)  # Apply Softmax for segmentation
         return out
-
 
 class Encoder(nn.Module):
     def __init__(self, backend):
@@ -73,54 +62,31 @@ class Encoder(nn.Module):
                 features.append(v(features[-1]))
         return features
 
-
-class UnetAdaptiveBins(nn.Module):
-    def __init__(self, backend, n_bins=100, min_val=0.1, max_val=10, norm='linear'):
-        super(UnetAdaptiveBins, self).__init__()
-        self.num_classes = n_bins
-        self.min_val = min_val
-        self.max_val = max_val
+class UnetAdaptiveSegmentation(nn.Module):
+    def __init__(self, backend, n_classes=21):  # n_classes for segmentation
+        super(UnetAdaptiveSegmentation, self).__init__()
+        self.num_classes = n_classes
         self.encoder = Encoder(backend)
-        self.adaptive_bins_layer = mViT(128, n_query_channels=128, patch_size=16,
-                                        dim_out=n_bins,
-                                        embedding_dim=128, norm=norm)
-
-        self.decoder = DecoderBN(num_classes=128)
-        self.conv_out = nn.Sequential(nn.Conv2d(128, n_bins, kernel_size=1, stride=1, padding=0),
-                                      nn.Softmax(dim=1))
+        self.decoder = DecoderBN(num_classes=n_classes)
+        # No adaptive_bins_layer needed
 
     def forward(self, x, **kwargs):
-        unet_out = self.decoder(self.encoder(x), **kwargs)
-        bin_widths_normed, range_attention_maps = self.adaptive_bins_layer(unet_out)
-        out = self.conv_out(range_attention_maps)
-
-        # Post process
-        # n, c, h, w = out.shape
-        # hist = torch.sum(out.view(n, c, h * w), dim=2) / (h * w)  # not used for training
-
-        bin_widths = (self.max_val - self.min_val) * bin_widths_normed  # .shape = N, dim_out
-        bin_widths = nn.functional.pad(bin_widths, (1, 0), mode='constant', value=self.min_val)
-        bin_edges = torch.cumsum(bin_widths, dim=1)
-
-        centers = 0.5 * (bin_edges[:, :-1] + bin_edges[:, 1:])
-        n, dout = centers.size()
-        centers = centers.view(n, dout, 1, 1)
-
-        pred = torch.sum(out * centers, dim=1, keepdim=True)
-
-        return bin_edges, pred
+        features = self.encoder(x)
+        seg_out = self.decoder(features)  # Output for semantic segmentation
+        return seg_out
 
     def get_1x_lr_params(self):  # lr/10 learning rate
         return self.encoder.parameters()
 
     def get_10x_lr_params(self):  # lr learning rate
-        modules = [self.decoder, self.adaptive_bins_layer, self.conv_out]
+        modules = [self.decoder]
         for m in modules:
             yield from m.parameters()
 
     @classmethod
-    def build(cls, n_bins, **kwargs):
+    def build(cls, n_classes, **kwargs):
         basemodel_name = 'tf_efficientnet_b5_ap'
+        # basemodel_name = 'tf_efficientnet_b3_ap'
 
         print('Loading base model ()...'.format(basemodel_name), end='')
         basemodel = torch.hub.load('rwightman/gen-efficientnet-pytorch', basemodel_name, pretrained=True)
@@ -133,13 +99,12 @@ class UnetAdaptiveBins(nn.Module):
 
         # Building Encoder-Decoder model
         print('Building Encoder-Decoder model..', end='')
-        m = cls(basemodel, n_bins=n_bins, **kwargs)
+        m = cls(basemodel, n_classes=n_classes, **kwargs)
         print('Done.')
         return m
 
-
 if __name__ == '__main__':
-    model = UnetAdaptiveBins.build(100)
+    model = UnetAdaptiveSegmentation.build(n_classes=21)  # Change to the number of classes for your task
     x = torch.rand(2, 3, 480, 640)
-    bins, pred = model(x)
-    print(bins.shape, pred.shape)
+    seg_out = model(x)
+    print(seg_out.shape)
