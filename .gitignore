@@ -9,3 +9,5 @@ checkpoints/
 pretrained/
 experiments/
 slurm*
+*.ipynb
+*.sh
